@@ -137,10 +137,13 @@ async function connectToWhatsApp(targetPhoneNumber = null) {
             auth: state,
             printQRInTerminal: !targetPhoneNumber,
             logger: pino({ level: 'silent' }),
-            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            browser: ['Windows', 'Chrome', '10.0'], // Standard Windows signature
             connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000,
-            markOnlineOnConnect: false
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000, // Faster keep-alive
+            emitOwnEvents: true,
+            markOnlineOnConnect: true, // Try marking online
+            retryRequestDelayMs: 250 // Faster retries
         });
 
         if (targetPhoneNumber && !sock.authState.creds.registered) {
