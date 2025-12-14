@@ -64,22 +64,39 @@ async function connectToWhatsApp() {
 
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                log('Connection closed. StatusCode:', statusCode, 'Error:', lastDisconnect?.error?.message);
+                const errorMessage = lastDisconnect?.error?.message || '';
+                log('Connection closed. StatusCode:', statusCode, 'Error:', errorMessage);
 
-                if (shouldReconnect) {
-                    const delay = statusCode === 408 ? 10000 : 5000;
-                    log(`Reconnecting in ${delay}ms...`);
-                    setTimeout(connectToWhatsApp, delay);
-                } else {
+                // Handle different disconnect reasons
+                if (statusCode === DisconnectReason.loggedOut) {
+                    // User logged out explicitly - clear session and restart
                     connectionStatus = 'logged_out';
                     qrCodeData = null;
-                    log('Logged out. Please scan QR again.');
-                    // Clear auth on logout
+                    log('Logged out explicitly. Clearing session...');
                     if (fs.existsSync(AUTH_DIR)) {
                         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     }
                     setTimeout(connectToWhatsApp, 3000);
+                } else if (statusCode === 401) {
+                    // Conflict - another session took over. Keep session, just reconnect.
+                    log('Session conflict detected. Waiting before reconnect...');
+                    connectionStatus = 'reconnecting';
+                    setTimeout(connectToWhatsApp, 10000); // Wait longer for conflict
+                } else if (statusCode === 515 || statusCode === 503) {
+                    // Stream error - restart required
+                    log('Stream error. Restarting connection...');
+                    connectionStatus = 'reconnecting';
+                    setTimeout(connectToWhatsApp, 5000);
+                } else if (statusCode === 408) {
+                    // Timeout - reconnect
+                    log('Connection timeout. Reconnecting...');
+                    connectionStatus = 'reconnecting';
+                    setTimeout(connectToWhatsApp, 10000);
+                } else {
+                    // Other errors - reconnect
+                    log('Unknown disconnect. Reconnecting...');
+                    connectionStatus = 'reconnecting';
+                    setTimeout(connectToWhatsApp, 5000);
                 }
             } else if (connection === 'open') {
                 log('Connected to WhatsApp!');
@@ -157,6 +174,21 @@ app.post('/send', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// Reset session - use this if you have connection problems
+app.get('/reset', (req, res) => {
+    log('Manual reset requested. Clearing session...');
+    if (sock) {
+        try { sock.end(); } catch (e) { }
+    }
+    if (fs.existsSync(AUTH_DIR)) {
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    }
+    connectionStatus = 'disconnected';
+    qrCodeData = null;
+    setTimeout(connectToWhatsApp, 2000);
+    res.json({ success: true, message: 'Session cleared. New QR will appear shortly.' });
 });
 
 // Health check for Railway
