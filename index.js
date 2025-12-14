@@ -1,3 +1,7 @@
+// Fix for "crypto is not defined" in newer Node.js versions
+const crypto = require('crypto');
+globalThis.crypto = crypto;
+
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
