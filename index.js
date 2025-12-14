@@ -18,7 +18,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 // PostgreSQL connection
 const pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    ssl: false
 });
 
 let sock = null;
