@@ -133,9 +133,14 @@ async function connectToWhatsApp() {
             auth: state,
             printQRInTerminal: true,
             logger: pino({ level: 'silent' }),
-            browser: ['WhatsApp Bot', 'Chrome', '1.0'],
-            connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000
+            browser: ['Ubuntu', 'Chrome', '114.0.0'],
+            connectTimeoutMs: 120000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 25000,
+            emitOwnEvents: false,
+            markOnlineOnConnect: false,
+            syncFullHistory: false,
+            generateHighQualityLinkPreview: false
         });
 
         sock.ev.on('connection.update', async (update) => {
