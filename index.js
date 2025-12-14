@@ -2,7 +2,7 @@ const crypto = require('crypto');
 globalThis.crypto = crypto;
 
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, initAuthCreds, BufferJSON, proto, delay } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const cors = require('cors');
 const pino = require('pino');
@@ -23,6 +23,7 @@ const pool = new Pool({
 
 let sock = null;
 let qrCodeData = null;
+let pairingCode = null;
 let connectionStatus = 'initializing';
 const serverLogs = [];
 
@@ -74,7 +75,6 @@ async function usePostgresAuthState() {
         await pool.query('DELETE FROM auth_state');
     };
 
-    // Load creds
     let creds = await readData('creds');
     if (!creds) {
         creds = initAuthCreds();
@@ -119,56 +119,74 @@ async function usePostgresAuthState() {
     };
 }
 
-async function connectToWhatsApp() {
+async function connectToWhatsApp(targetPhoneNumber = null) {
     try {
-        log('Connecting to WhatsApp...');
+        if (sock) {
+            try { sock.end(); } catch (e) { }
+            sock = null;
+        }
+
+        log(targetPhoneNumber ? `Starting pairing with ${targetPhoneNumber}...` : 'Connecting to WhatsApp...');
         connectionStatus = 'connecting';
 
         const { state, saveCreds, clearAll } = await usePostgresAuthState();
         const { version } = await fetchLatestBaileysVersion();
-        log(`WhatsApp version: ${version.join('.')}`);
 
         sock = makeWASocket({
             version,
             auth: state,
-            printQRInTerminal: true,
+            printQRInTerminal: !targetPhoneNumber,
             logger: pino({ level: 'silent' }),
-            browser: ['Ubuntu', 'Chrome', '114.0.0'],
-            connectTimeoutMs: 120000,
-            defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 25000,
-            emitOwnEvents: false,
-            markOnlineOnConnect: false,
-            syncFullHistory: false,
-            generateHighQualityLinkPreview: false
+            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+            markOnlineOnConnect: false
         });
+
+        if (targetPhoneNumber && !sock.authState.creds.registered) {
+            log('Requesting pairing code...');
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(targetPhoneNumber);
+                    pairingCode = code;
+                    connectionStatus = 'pairing';
+                    log(`Pairing Code: ${code}`);
+                } catch (err) {
+                    log(`Pairing error: ${err.message}`);
+                    connectionStatus = 'error';
+                }
+            }, 3000);
+        }
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
-            if (qr) {
+            if (qr && !targetPhoneNumber) {
                 log('QR Code received');
                 connectionStatus = 'scanning';
                 qrCodeData = await QRCode.toDataURL(qr);
+                pairingCode = null;
             }
 
             if (connection === 'close') {
                 const code = lastDisconnect?.error?.output?.statusCode;
                 log(`Disconnected (code: ${code})`);
                 qrCodeData = null;
+                pairingCode = null;
 
                 if (code === DisconnectReason.loggedOut) {
-                    log('Logged out - clearing session from database');
+                    log('Logged out - clearing session');
                     connectionStatus = 'logged_out';
                     await clearAll();
                 } else {
                     connectionStatus = 'reconnecting';
+                    setTimeout(() => connectToWhatsApp(targetPhoneNumber), 5000);
                 }
-                setTimeout(connectToWhatsApp, 5000);
             } else if (connection === 'open') {
                 log('Connected to WhatsApp!');
                 connectionStatus = 'connected';
                 qrCodeData = null;
+                pairingCode = null;
             }
         });
 
@@ -193,7 +211,7 @@ async function connectToWhatsApp() {
     } catch (err) {
         log(`Error: ${err.message}`);
         connectionStatus = 'error';
-        setTimeout(connectToWhatsApp, 10000);
+        setTimeout(() => connectToWhatsApp(targetPhoneNumber), 10000);
     }
 }
 
@@ -201,14 +219,27 @@ async function connectToWhatsApp() {
 app.get('/', (req, res) => {
     res.send(`<html><head><title>WhatsApp Bot</title></head>
     <body style="font-family:Arial;padding:40px;text-align:center;">
-    <h1>WhatsApp Bot (PostgreSQL Session)</h1>
+    <h1>WhatsApp Bot</h1>
     <p>Status: <strong>${connectionStatus}</strong></p>
+    ${pairingCode ? `<h2>Pairing Code: <span style="font-size: 2em; letter-spacing: 5px;">${pairingCode}</span></h2>` : ''}
     <p><a href="/qr">QR</a> | <a href="/logs">Logs</a> | <a href="/reset">Reset</a></p>
     </body></html>`);
 });
 
 app.get('/qr', (req, res) => {
-    res.json({ status: connectionStatus, qr: qrCodeData });
+    res.json({ status: connectionStatus, qr: qrCodeData, pairingCode });
+});
+
+app.post('/pair', async (req, res) => {
+    const { phoneNumber } = req.body;
+    if (!phoneNumber) return res.status(400).json({ error: 'Phone number required' });
+
+    // Clean phone number
+    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+
+    log(`Pairing requested for ${cleanNumber}`);
+    await connectToWhatsApp(cleanNumber);
+    res.json({ success: true, message: 'Pairing initiated' });
 });
 
 app.get('/logs', (req, res) => {
@@ -216,17 +247,19 @@ app.get('/logs', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'healthy', whatsapp: connectionStatus, db: 'postgresql' });
+    res.json({ status: 'healthy', whatsapp: connectionStatus });
 });
 
 app.get('/reset', async (req, res) => {
-    log('Manual reset - clearing database session');
+    log('Manual reset');
     if (sock) { try { sock.end(); } catch (e) { } }
-    await pool.query('DELETE FROM auth_state');
+    const { clearAll } = await usePostgresAuthState();
+    await clearAll();
     connectionStatus = 'disconnected';
     qrCodeData = null;
+    pairingCode = null;
     sock = null;
-    setTimeout(connectToWhatsApp, 2000);
+    setTimeout(() => connectToWhatsApp(), 2000);
     res.json({ success: true });
 });
 
@@ -244,11 +277,11 @@ app.post('/send', async (req, res) => {
 });
 
 // Start
-log('Starting server with PostgreSQL session storage...');
+log('Starting server...');
 initDB().then(() => {
     app.listen(PORT, '0.0.0.0', () => {
         log(`Server on port ${PORT}`);
-        connectToWhatsApp();
+        connectToWhatsApp(); // Start in QR mode initially
     });
 });
 
